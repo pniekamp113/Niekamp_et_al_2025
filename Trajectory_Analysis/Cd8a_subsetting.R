@@ -106,3 +106,10 @@ data_pivoted <- data_subset %>%
 
 write.csv(data_pivoted, file = "DEGs_for_heatmap_sorted.csv")
 
+
+# get cell numbers per cluster for Fig. XF
+cell_counts <- table(Cd8a_subset$labels, Cd8a_subset$tree.ident)
+cell_counts_df <- as.data.frame(cell_counts)
+write.csv(cell_counts_df, file = "cell_counts_by_cluster.csv")
+
+
