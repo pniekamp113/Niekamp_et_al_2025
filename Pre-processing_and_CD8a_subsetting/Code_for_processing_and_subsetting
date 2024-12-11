@@ -1,0 +1,186 @@
+# Pre-processing and CD8a subsetting and re-clustering
+
+# Load required libraries 
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(tibble)
+library(RColorBrewer)
+
+#set working directory
+setwd("raw_feature_bc_matrix")
+# read in h5 file
+data <- Read10X_h5("raw_feature_bc_matrix.h5")
+# create seurat object
+seurat_obj <- CreateSeuratObject(counts = data)
+# Filter based on RNA metrics to remove empty droplets
+seurat_obj <- subset(seurat_obj, subset = nCount_RNA > 50 & nFeature_RNA > 200)
+
+
+# Demultiplexing
+
+# Set the default assay to 'RNA' 
+DefaultAssay(seurat_obj) <- "RNA"
+# Access the Antibody Capture layer 
+hto_data <- GetAssayData(seurat_obj, layer = "counts.Antibody Capture")
+# Create a new assay for the HTO counts
+seurat_obj[["HTO"]] <- CreateAssayObject(counts = hto_data)
+# Normalize the HTO data using the CLR transformation
+seurat_obj <- NormalizeData(seurat_obj, assay = "HTO", normalization.method = "CLR")
+# Perform the demultiplexing based on HTO data
+seurat_obj <- HTODemux(seurat_obj, assay = "HTO", positive.quantile = 0.99)
+# Violin plot for HTO counts
+VlnPlot(seurat_obj, features = c("TotalSeq-C0301-HTO1", "TotalSeq-C0302-HTO2", "TotalSeq-C0303-HTO3"), pt.size = 0.1)
+
+
+#exclude dead cells
+seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^mt-")
+
+# Scatter plot of total counts vs. number of features
+ggplot(seurat_obj@meta.data, aes(x = nCount_RNA, y = nFeature_RNA)) + 
+  geom_point(aes(color = percent.mt)) + 
+  scale_color_gradient(low = "blue", high = "red") + 
+  theme_minimal() +
+  labs(title = "Total Counts vs. Number of Features", x = "Total Counts", y = "Number of Features")
+# Filter out low-quality cells
+seurat_obj <- subset(seurat_obj, subset = percent.mt < 20)
+
+
+# Normalize data
+seurat_obj <- NormalizeData(seurat_obj, layer = "counts.Gene Expression")
+seurat_obj <- FindVariableFeatures(seurat_obj, layer = "counts.Gene Expression", nfeatures = 2000)
+# Scale the data
+seurat_obj <- ScaleData(seurat_obj)
+# Perform PCA
+seurat_obj <- RunPCA(seurat_obj)
+seurat_obj<-RunUMAP(seurat_obj,dims = 1:30)
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:30)  # Adjust dims based on your analysis
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.3)  # Adjust resolution based on your data
+seurat_obj <-BuildClusterTree(seurat_obj,reorder.numeric = T,reorder = T)
+
+
+# Clean up object by removing "negative" and "doublet" cells
+unique(seurat_obj$hash.ID)
+
+# Subset the Seurat object to exclude "Doublet" and "Negative" cells
+filtered_seurat_obj <- subset(seurat_obj, subset = hash.ID != "Doublet" & hash.ID != "Negative")
+
+
+#add labels
+# Define the new labels
+label_mapping <- c(
+  "TotalSeq-C0301-HTO1" = "WT",
+  "TotalSeq-C0302-HTO2" = "RARa-KO",
+  "TotalSeq-C0303-HTO3" = "RARa-TG"
+)
+
+filtered_seurat_obj$Sample_Label <- label_mapping[as.character(filtered_seurat_obj$HTO)]
+
+
+
+#Let's recluster using the filtered_seurat object 
+seurat_obj <- NormalizeData(filtered_seurat_obj, layer = "counts.Gene Expression")
+seurat_obj <- FindVariableFeatures(seurat_obj, layer = "counts.Gene Expression", nfeatures = 2000)
+seurat_obj <- ScaleData(seurat_obj)
+seurat_obj <- RunPCA(seurat_obj)
+seurat_obj <- RunUMAP(seurat_obj,dims = 1:50)
+seurat_obj <- FindNeighbors(seurat_obj, dims = 1:50)  # Adjust dims based on your analysis
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5)  # Adjust resolution based on your data
+seurat_obj <-BuildClusterTree(seurat_obj,reorder.numeric = T,reorder = T)
+
+#save seurat object
+saveRDS(seurat_obj, file ="seurat_obj.rds")
+
+
+#Filter Cd8a+ clusters 
+Idents(combined) <- "tree.ident"
+clusters_to_subset <- c("7", "8", "9", "11")
+cells_to_keep <- which(Idents(combined) %in% clusters_to_subset)
+Cd8a_subset <- subset(combined, cells = cells_to_keep)
+
+
+Cd8a_subset <- NormalizeData(Cd8a_subset, layer = "counts.Gene Expression")
+Cd8a_subset <- FindVariableFeatures(Cd8a_subset, layer = "counts.Gene Expression", nfeatures = 2000)
+Cd8a_subset <- ScaleData(Cd8a_subset)
+Cd8a_subset <- RunPCA(Cd8a_subset)
+Cd8a_subset <- RunUMAP(Cd8a_subset,dims = 1:40)
+Cd8a_subset <- FindNeighbors(Cd8a_subset, dims = 1:40)
+Cd8a_subset <- FindClusters(Cd8a_subset, resolution = 0.4)
+Cd8a_subset <- BuildClusterTree(Cd8a_subset,reorder.numeric = T,reorder = T)
+
+#check for successful selection of Cd8a+ cells
+p1 <- DimPlot(Cd8a_subset, label = TRUE)
+p2 <- DimPlot(Cd8a_subset, group.by = "HTO_maxID")
+p3 <- FeaturePlot(Cd8a_subset, "Cd8a")
+cowplot::plot_grid(p1, p2,p3)
+
+#Finalize CD8a by excluding C5
+Idents(Cd8a_subset) <- "tree.ident"
+clusters_to_subset <- c("1", "2", "3", "4", "6", "7")
+cells_to_keep <- which(Idents(Cd8a_subset) %in% clusters_to_subset)
+Cd8a_final <- subset(Cd8a_subset, cells = cells_to_keep)
+DimPlot(Cd8a_final)
+
+Cd8a_subset <- NormalizeData(Cd8a_final, layer = "counts.Gene Expression")
+Cd8a_subset <- FindVariableFeatures(Cd8a_subset, layer = "counts.Gene Expression", nfeatures = 2000)
+Cd8a_subset <- ScaleData(Cd8a_subset)
+Cd8a_subset <- RunPCA(Cd8a_subset)
+Cd8a_subset <- RunUMAP(Cd8a_subset,dims = 1:40)
+Cd8a_subset <- FindNeighbors(Cd8a_subset, dims = 1:40)
+Cd8a_subset <- FindClusters(Cd8a_subset, resolution = 0.4)
+Cd8a_subset <- BuildClusterTree(Cd8a_subset,reorder.numeric = T,reorder = T)
+
+# check for improved selection
+p1 <- DimPlot(Cd8a_subset, label = TRUE)
+p2 <- DimPlot(Cd8a_subset, group.by = "HTO_maxID")
+p3 <- FeaturePlot(Cd8a_subset, "Cd8a")
+cowplot::plot_grid(p1, p2,p3)
+
+saveRDS(Cd8a_subset, file = "final_Cd8a_subset.rds")
+
+
+
+# Cell numbers for each sample in each cluster
+cell_counts <- table(Cd8a_subset$labels, Cd8a_subset$tree.ident)
+cell_counts_df <- as.data.frame(cell_counts)
+write.csv(cell_counts_df, file = "cell_counts_by_cluster.csv")
+print(cell_counts_df)
+
+
+# Add names and re-order samples
+hto_labels <- c(
+  "TotalSeq-C0301-HTO1" = "WT",
+  "TotalSeq-C0302-HTO2" = "RARa-KO",
+  "TotalSeq-C0303-HTO3" = "RARa-TG"
+)
+
+labels <- hto_labels[Cd8a_subset$HTO_maxID]
+names(labels) <- colnames(Cd8a_subset)
+Cd8a_subset <- AddMetaData(Cd8a_subset, metadata = labels, col.name = "labels")
+Cd8a_subset$labels <- factor(Cd8a_subset$labels, levels = c("WT", "RARa-KO", "RARa-TG"))
+
+# Rename clusters
+new_cluster_names <- c(
+  "1" = "Teff3",
+  "2" = "Early Teff",
+  "3" = "Naive-Like",
+  "4" = "Teff2",
+  "5" = "Teff1",
+  "6" = "Proliferating Teff"
+)
+
+# Re-order the factor levels for the identities
+levels(Cd8a_subset) <- c("Proliferating Teff", "Teff1", "Teff3", "Teff2", "Early Teff", "Naive-Like")
+
+
+# UMAP projections for Fig. XA+B
+p1 <- DimPlot(Cd8a_subset, pt.size = 1) + NoLegend()
+p2 <- DimPlot(Cd8a_subset, group.by = "labels", pt.size = 1, cols = c("green", "magenta", "orange" )) + NoLegend() + labs(title = NULL) 
+cowplot::plot_grid(p1, p2)
+
+
+# Find markers for heatmap on Fig. 
+Markers <- FindAllMarkers(Cd8a_subset, only.pos = FALSE, min.pct = 0, logfc.threshold = 0)
+write.csv(Markers, file = "Markers_for_heatmap.csv")
